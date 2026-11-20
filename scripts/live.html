@@ -1,0 +1,168 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Furnace live (canvas)</title>
+<style>
+ body{margin:0;background:#0d1117;color:#c9d1d9;font-family:Segoe UI,Arial,sans-serif}
+ .wrap{padding:16px 20px;max-width:1300px}
+ h1{font-size:20px;margin:0 0 4px}
+ .sub{color:#8b949e;font-size:13px;margin-bottom:12px}
+ .cards{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+ .card{flex:1;min-width:120px;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:8px 12px}
+ .card .k{color:#8b949e;font-size:12px}
+ .card .v{font-size:22px;font-weight:700;color:#58a6ff}
+ .box{position:relative;margin-bottom:12px}
+ canvas{display:block;width:100%;background:#0d1117;border:1px solid #30363d;border-radius:8px;cursor:crosshair}
+ #tip{position:absolute;pointer-events:none;background:#161b22ee;border:1px solid #58a6ff;border-radius:6px;
+      padding:6px 10px;font-size:13px;line-height:1.5;display:none;white-space:nowrap;z-index:5}
+ .hint{color:#484f58;font-size:12px;margin-top:8px}
+</style></head><body><div class="wrap">
+<h1>AI-858 furnace - LIVE</h1>
+<div class="sub" id="sub">connecting ...</div>
+<div class="cards">
+ <div class="card"><div class="k">PV</div><div class="v" id="v_pv" style="color:#f85149">-</div></div>
+ <div class="card"><div class="k">SV / ref</div><div class="v" id="v_sv" style="color:#58a6ff">-</div></div>
+ <div class="card"><div class="k">MV</div><div class="v" id="v_mv" style="color:#3fb950">-</div></div>
+ <div class="card"><div class="k">error</div><div class="v" id="v_err" style="color:#d29922">-</div></div>
+ <div class="card"><div class="k">elapsed</div><div class="v" id="v_t" style="color:#8b949e">-</div></div>
+ <div class="card"><div class="k">phase</div><div class="v" id="v_ph" style="color:#8b949e">-</div></div>
+</div>
+<div class="box"><canvas id="c1" height="420"></canvas><div id="tip"></div></div>
+<div class="box"><canvas id="c2" height="170"></canvas></div>
+<div class="hint">red = PV, dashed blue = SV, green = MV (0-100%) &nbsp;|&nbsp; data reloads every 2 s, hover stays active</div>
+</div>
+<script>
+const c1=document.getElementById('c1'), c2=document.getElementById('c2'), tip=document.getElementById('tip');
+const k1=c1.getContext('2d'), k2=c2.getContext('2d');
+const PADL=64, PADR=18, PADT=18, PADB=38;
+let D=[], W=0,H=0,W2=0,H2=0, hoverT=null, lastUpd=0;
+const TIMESPANS=[60,120,180,300,600,900,1200,1800,2700,3600,5400,7200,10800,14400,21600,28800,43200];
+function niceSpan(v){ for(const s of TIMESPANS){ if(v<=s) return s; } return v*1.2; }
+function fmt(s){ s=Math.round(s); const m=Math.floor(s/60), r=s%60; return m+':'+String(r).padStart(2,'0'); }
+function niceStep(v){ for(const s of [1,2,5,10,20,25,50,100,200,250,500,1000]){ if(v<=s) return s; } return 2000; }
+
+function resize(){
+  const a=c1.getBoundingClientRect(); W=Math.floor(a.width); H=420;
+  c1.width=W*window.devicePixelRatio; c1.height=H*window.devicePixelRatio;
+  k1.setTransform(window.devicePixelRatio,0,0,window.devicePixelRatio,0,0);
+  const b=c2.getBoundingClientRect(); W2=Math.floor(b.width); H2=170;
+  c2.width=W2*window.devicePixelRatio; c2.height=H2*window.devicePixelRatio;
+  k2.setTransform(window.devicePixelRatio,0,0,window.devicePixelRatio,0,0);
+  draw();
+}
+
+function parseCSV(txt){
+  const lines=txt.split(/\r?\n/).filter(x=>x.trim());
+  if(lines.length<2) return [];
+  const head=lines[0].split(',');
+  const iT=head.indexOf('elapsed_s'), iP=head.indexOf('PV_C'), iS=head.indexOf('SV_C'), iM=head.indexOf('MV_pct'), iPh=head.indexOf('phase');
+  const out=[];
+  for(let i=1;i<lines.length;i++){
+    const p=lines[i].split(',');
+    if(p.length<head.length) continue;
+    const t=parseFloat(p[iT]), pv=parseFloat(p[iP]), sv=parseFloat(p[iS]), mv=parseFloat(p[iM]);
+    if(!isFinite(t)||!isFinite(pv)) continue;
+    out.push([t,pv,sv,mv,p[iPh]||'']);
+  }
+  return out;
+}
+
+async function loadData(){
+  try{
+    const r=await fetch('/data.csv?ts='+Date.now(), {cache:'no-store'});
+    if(!r.ok) throw new Error('http '+r.status);
+    const txt=await r.text();
+    D=parseCSV(txt);
+    lastUpd=Date.now();
+    updateCards();
+    draw();
+  }catch(e){
+    document.getElementById('sub').textContent='waiting for data ... ('+e.message+')';
+  }
+}
+
+function updateCards(){
+  if(!D.length) return;
+  const d=D[D.length-1];
+  document.getElementById('v_pv').textContent=d[1].toFixed(1)+' C';
+  document.getElementById('v_sv').textContent=(isFinite(d[2])?d[2].toFixed(1):'-')+' C';
+  document.getElementById('v_mv').textContent=d[3].toFixed(0)+' %';
+  document.getElementById('v_err').textContent=(isFinite(d[2])?(d[2]-d[1]>=0?'+':'')+(d[2]-d[1]).toFixed(1):'-')+' C';
+  document.getElementById('v_t').textContent=fmt(d[0]);
+  document.getElementById('v_ph').textContent=d[4]||'-';
+  document.getElementById('sub').textContent='samples '+D.length+'   |   updated '+(new Date()).toLocaleTimeString()+'   |   auto-reload 2 s';
+}
+
+function draw(){
+  if(!D.length){ return; }
+  const tmax=D[D.length-1][0];
+  const span=niceSpan(tmax);
+  let lo=1e9,hi=-1e9;
+  for(const d of D){ if(d[1]<lo)lo=d[1]; if(d[1]>hi)hi=d[1]; if(isFinite(d[2])){ if(d[2]<lo)lo=d[2]; if(d[2]>hi)hi=d[2]; } }
+  const pad=(hi-lo)*0.08+5;
+  const YMIN=Math.max(0,Math.floor((lo-pad)/10)*10), YMAX=Math.ceil((hi+pad)/10)*10;
+  const X=t=>PADL+(t/span)*(W-PADL-PADR);
+  const Y=v=>H-PADB-(v-YMIN)/(YMAX-YMIN)*(H-PADT-PADB);
+  const X2=t=>PADL+(t/span)*(W2-PADL-PADR);
+  const Y2=v=>H2-30-Math.min(100,Math.max(0,v))/100*(H2-16-30);
+  k1.clearRect(0,0,W,H); k2.clearRect(0,0,W2,H2);
+  // y grid
+  k1.font='12px Segoe UI'; k1.textAlign='right';
+  const ystep=niceStep((YMAX-YMIN)/5);
+  for(let v=YMIN;v<=YMAX+1e-6;v+=ystep){
+    const y=Y(v); k1.strokeStyle='#21262d'; k1.beginPath(); k1.moveTo(PADL,y); k1.lineTo(W-PADR,y); k1.stroke();
+    k1.fillStyle='#8b949e'; k1.fillText(Math.round(v),PADL-8,y+4);
+  }
+  // x grid
+  k1.textAlign='center';
+  for(let i=0;i<=6;i++){
+    const t=span*i/6, x=X(t);
+    k1.strokeStyle='#21262d'; k1.beginPath(); k1.moveTo(x,PADT); k1.lineTo(x,H-PADB); k1.stroke();
+    k2.strokeStyle='#21262d'; k2.beginPath(); k2.moveTo(X2(t),16); k2.lineTo(X2(t),H2-30); k2.stroke();
+    k1.fillStyle='#8b949e'; k1.fillText(fmt(t),x,H-PADB+18);
+  }
+  // sv
+  k1.setLineDash([7,5]); k1.strokeStyle='#58a6ff'; k1.lineWidth=2; k1.beginPath();
+  let st=false;
+  for(const d of D){ if(!isFinite(d[2])) continue; const x=X(d[0]),y=Y(d[2]); if(!st){k1.moveTo(x,y);st=true;} else k1.lineTo(x,y); }
+  k1.stroke(); k1.setLineDash([]);
+  // pv
+  k1.strokeStyle='#f85149'; k1.lineWidth=2.5; k1.beginPath();
+  D.forEach((d,i)=>{ const x=X(d[0]),y=Y(d[1]); i?k1.lineTo(x,y):k1.moveTo(x,y); });
+  k1.stroke();
+  // mv
+  k2.strokeStyle='#3fb950'; k2.lineWidth=2; k2.beginPath();
+  D.forEach((d,i)=>{ const x=X2(d[0]),y=Y2(d[3]); i?k2.lineTo(x,y):k2.moveTo(x,y); });
+  k2.stroke();
+  k2.textAlign='right'; k2.fillStyle='#8b949e';
+  for(const v of [0,25,50,75,100]){ const y=Y2(v); k2.strokeStyle='#21262d'; k2.beginPath(); k2.moveTo(PADL,y); k2.lineTo(W2-PADR,y); k2.stroke(); k2.fillText(v+'%',PADL-8,y+4); }
+  // crosshair
+  if(hoverT!==null){
+    let bi=0,bd=1e9;
+    for(let i=0;i<D.length;i++){ const dd=Math.abs(D[i][0]-hoverT); if(dd<bd){bd=dd;bi=i;} }
+    const d=D[bi], x=X(d[0]);
+    k1.strokeStyle='#8b949e'; k1.setLineDash([3,3]); k1.beginPath(); k1.moveTo(x,PADT); k1.lineTo(x,H-PADB); k1.stroke(); k1.setLineDash([]);
+    k1.fillStyle='#f85149'; k1.beginPath(); k1.arc(x,Y(d[1]),4,0,7); k1.fill();
+    k2.strokeStyle='#8b949e'; k2.setLineDash([3,3]); k2.beginPath(); k2.moveTo(X2(d[0]),16); k2.lineTo(X2(d[0]),H2-30); k2.stroke(); k2.setLineDash([]);
+    tip.innerHTML='time <b>'+fmt(d[0])+'</b><br>PV <b style="color:#f85149">'+d[1].toFixed(1)+' C</b><br>'
+                 +'SV <b style="color:#58a6ff">'+(isFinite(d[2])?d[2].toFixed(1):'-')+' C</b><br>'
+                 +'MV <b style="color:#3fb950">'+d[3].toFixed(0)+'%</b>';
+    tip.style.display='block';
+    tip.style.left=Math.min(W-170,x+14)+'px';
+    tip.style.top=Math.max(4,Y(d[1])-70)+'px';
+  } else { tip.style.display='none'; }
+}
+
+function onMove(e){
+  const r=c1.getBoundingClientRect();
+  const span=niceSpan(D.length?D[D.length-1][0]:1);
+  const t=(e.clientX-r.left-PADL)/(W-PADL-PADR)*span;
+  hoverT=Math.max(0,t);
+  draw();
+}
+c1.addEventListener('mousemove',onMove);
+c2.addEventListener('mousemove',e=>{ const r=c2.getBoundingClientRect(); const span=niceSpan(D.length?D[D.length-1][0]:1); hoverT=Math.max(0,(e.clientX-r.left-PADL)/(W2-PADL-PADR)*span); draw(); });
+c1.addEventListener('mouseleave',()=>{ hoverT=null; draw(); });
+c2.addEventListener('mouseleave',()=>{ hoverT=null; draw(); });
+window.addEventListener('resize',resize);
+resize();
+loadData();
+setInterval(loadData,2000);
+</script></body></html>
